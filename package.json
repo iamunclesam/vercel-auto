@@ -8,6 +8,7 @@
     "http": "^0.0.1-security",
     "mongoose": "^8.13.2",
     "nodemon": "^3.1.10",
+    "simple-git": "^3.27.0",
     "simplegit": "^1.0.2",
     "validator": "^13.15.0"
   },
