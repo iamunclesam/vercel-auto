@@ -11,7 +11,6 @@ const usageRoutes = require('./routes/usageRoutes');
 
 //starting app
 const app = express();
-const server = http.createServer(app);
 
 //middlewares
 app.use(cors({
