@@ -22,7 +22,7 @@ exports.deployTheme = async (req, res) => {
       return res.status(409).json({ error: 'Project name already exists for this user' });
     }
 
-    await simpleGit().clone(githubRepoUrl, localPath);
+    await simpleGit().clone(githubRepoUrl, localPath); //checked
 
     const vercelProjectRes = await axios.post(
       `${VERCEL_API_BASE}/v9/projects`,
