@@ -6,6 +6,7 @@ const http = require('http');
 const deployRoutes = require('./routes/deployRoutes');
 const domainRoutes = require('./routes/domainRoutes');
 const usageRoutes = require('./routes/usageRoutes');
+const connectDB = require('./config/db')
 
 
 //starting app
@@ -19,6 +20,7 @@ app.use(cors({
   credentials: true  
 }));
 
+connectDB()
 
 app.use(express.json());
 app.use(bodyParser.json());
