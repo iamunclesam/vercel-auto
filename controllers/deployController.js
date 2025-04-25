@@ -10,10 +10,11 @@ const VERCEL_TOKEN = process.env.VERCEL_API_TOKEN;
 exports.deployTheme = async (req, res) => {
   const { userId, githubRepoUrl, projectName, themeName } = req.body;
 
-  // 1. Validate request
   if (!userId || !githubRepoUrl || !projectName || !themeName) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
+
+  const localPath = path.join(__dirname, `../tmp/${Date.now()}-${projectName}`);
 
   try {
     const existing = await Project.findOne({ userId, projectName });
@@ -21,29 +22,32 @@ exports.deployTheme = async (req, res) => {
       return res.status(409).json({ error: 'Project name already exists for this user' });
     }
 
-    //  Clone GitHub Repo
-    const localPath = path.join(__dirname, `../tmp/${Date.now()}-${projectName}`);
     await simpleGit().clone(githubRepoUrl, localPath);
 
-    //Create Vercel Project
-    const vercelProjectRes = await axios.post(`${VERCEL_API_BASE}/v9/projects`, {
-      name: projectName,
-    }, {
-      headers: { Authorization: `Bearer ${VERCEL_TOKEN}` }
-    });
+    const vercelProjectRes = await axios.post(
+      `${VERCEL_API_BASE}/v9/projects`,
+      { name: projectName },
+      {
+        headers: { Authorization: `Bearer ${VERCEL_TOKEN}` },
+      }
+    );
 
     const vercelProjectId = vercelProjectRes.data.id;
 
-    const deployResponse = await axios.post(`${VERCEL_API_BASE}/v13/deployments`, {
-      name: projectName,
-      gitSource: {
-        type: 'github',
-        repo: githubRepoUrl.split('github.com/')[1],
+    const deployResponse = await axios.post(
+      `${VERCEL_API_BASE}/v13/deployments`,
+      {
+        name: projectName,
+        gitSource: {
+          type: 'github',
+          repo: githubRepoUrl.split('github.com/')[1],
+        },
+        project: vercelProjectId,
       },
-      project: vercelProjectId
-    }, {
-      headers: { Authorization: `Bearer ${VERCEL_TOKEN}` }
-    });
+      {
+        headers: { Authorization: `Bearer ${VERCEL_TOKEN}` },
+      }
+    );
 
     const deploymentUrl = deployResponse.data.url;
 
@@ -59,14 +63,20 @@ exports.deployTheme = async (req, res) => {
 
     await fs.remove(localPath);
 
-    return res.status(201).json({ message: 'Deployed successfully', project: savedProject });
+    return res.status(201).json({
+      message: 'Deployed successfully',
+      project: savedProject,
+    });
 
   } catch (err) {
     console.error('Deployment Error:', err?.response?.data || err.message);
 
-    // Optional: Cleanup tmp dir on failure
-    if (localPath && fs.existsSync(localPath)) {
-      await fs.remove(localPath);
+    try {
+      if (localPath && fs.existsSync(localPath)) {
+        await fs.remove(localPath);
+      }
+    } catch (cleanupErr) {
+      console.warn('Failed to clean up temp directory:', cleanupErr.message);
     }
 
     return res.status(500).json({ error: 'Deployment failed.' });
