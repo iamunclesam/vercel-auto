@@ -1,28 +1,42 @@
 const express = require('express');
-const app = express();
-
-// Import routes
+const dotenv = require('dotenv').config();
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const http = require('http');
 const deployRoutes = require('./routes/deployRoutes');
 const domainRoutes = require('./routes/domainRoutes');
 const usageRoutes = require('./routes/usageRoutes');
 
-// Middleware to parse JSON
+
+//starting app
+const app = express();
+
+//middlewares
+app.use(cors({
+  origin: "*", 
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true  
+}));
+
+app.use('/api/deploy', deployRoutes);
+app.use('/api/domain', domainRoutes);
+app.use('/api/usage', usageRoutes);
+
 app.use(express.json());
+app.use(bodyParser.json());
+app.use(express.urlencoded({ extended: true }));
+app.set('trust proxy', false);
 
-// Use the imported routes
-app.use('/deploy', deployRoutes);
-app.use('/domain', domainRoutes);
-app.use('/usage', usageRoutes);
 
-// Basic route
 app.get('/', (req, res) => {
-    res.send('Hello, Vercel!');
+  res.status(200).json('Welcome to Vercel Theme Deployer');
 });
 
-// Start the server
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 5050;
+
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+  console.log('Listening for requests on', PORT);
 });
 
 module.exports = app;
