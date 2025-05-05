@@ -7,6 +7,7 @@ const http = require('http');
 const deployRoutes = require('./routes/deployRoutes');
 const domainRoutes = require('./routes/domainRoutes');
 const usageRoutes = require('./routes/usageRoutes');
+const connectDB = require('./config/db')
 
 // Starting app
 const app = express();
