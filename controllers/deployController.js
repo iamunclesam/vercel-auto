@@ -73,7 +73,7 @@ exports.deployTheme = async (req, res) => {
     branch = 'main',
     installCommand = 'npm install --legacy-peer-deps --force',
     buildCommand = 'npm run build',
-    outputDirectory = '.next',
+    outputDirectory = 'out',
     envVars = {}
   } = req.body;
 
@@ -173,10 +173,12 @@ exports.deployTheme = async (req, res) => {
 
     // 6. Create Vercel deployment
     broadcastProgress('vercel-deploy', 'Creating Vercel deployment...', 60);
+    // 6. Create Vercel deployment
     const deployRes = await axios.post(
       `${VERCEL_API_BASE}/v13/deployments`,
       {
         name: projectName,
+        project: projectName, // ✅ Add this line
         files,
         projectSettings: {
           framework: null,
@@ -194,6 +196,7 @@ exports.deployTheme = async (req, res) => {
         },
       }
     );
+    console.log('✅ Deployment created successfully');
 
     const { id: deploymentId, url: deploymentUrl } = deployRes.data;
     console.log(`🎯 Deployment created. ID: ${deploymentId}, URL: ${deploymentUrl}`);
