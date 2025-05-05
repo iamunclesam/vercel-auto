@@ -1,24 +1,22 @@
 {
   "dependencies": {
-    "axios": "^1.8.4",
-<<<<<<< HEAD
-    "express": "^5.1.0",
-    "fs-extra": "^11.3.0",
-    "mongoose": "^8.13.2",
-    "nodemon": "^3.1.9",
-    "path": "^0.12.7",
-=======
+    "axios": "^1.9.0",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
+    "crypto": "^1.0.1",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
+    "fast-glob": "^3.3.3",
     "fs-extra": "^11.3.0",
+    "globby": "^14.1.0",
     "http": "^0.0.1-security",
-    "mongoose": "^8.13.2",
+    "jsonwebtoken": "^9.0.2",
+    "mime-types": "^3.0.1",
+    "mongoose": "^8.14.1",
     "nodemon": "^3.1.10",
->>>>>>> 044d76d7ea4f46711742b3425616a6a1932f2e69
     "simple-git": "^3.27.0",
     "simplegit": "^1.0.2",
+    "uuid": "^11.1.0",
     "validator": "^13.15.0"
   },
   "name": "vercel-auto",
@@ -26,16 +24,10 @@
   "description": "auto deployment system for projects using vercel as hosting and domain provider",
   "main": "app.js",
   "scripts": {
-<<<<<<< HEAD
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon app.js",
-    "start": "node app.js"
-=======
     "start": "node app.js",
-    "dev": "nodemon app.js",
+    "dev": "node app.js",
     "test": "NODE_ENV=test jest --detectOpenHandles",
     "build": "npm install"
->>>>>>> 044d76d7ea4f46711742b3425616a6a1932f2e69
   },
   "repository": {
     "type": "git",
