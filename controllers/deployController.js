@@ -57,7 +57,7 @@ const pollDeploymentStatus = async (deploymentId, startTime) => {
 };
 
 
-// Then modify your deployTheme function to include progress broadcasts:
+
 exports.deployTheme = async (req, res) => {
   const startTime = Date.now();
   console.log('🚀 Starting deployment process at', new Date(startTime).toISOString());
@@ -73,7 +73,7 @@ exports.deployTheme = async (req, res) => {
     branch = 'main',
     installCommand = 'npm install --legacy-peer-deps --force',
     buildCommand = 'npm run build',
-    outputDirectory = 'out',
+    outputDirectory = '.next',
     envVars = {}
   } = req.body;
 
@@ -81,17 +81,6 @@ exports.deployTheme = async (req, res) => {
     console.error('❌ Missing required fields');
     broadcastProgress('error', 'Missing required fields', 100);
     return res.status(400).json({ error: 'Missing required fields' });
-  }
-
-  const existingProject = await Project.findOne({ storeId });
-  if (existingProject) {
-    console.error(`⚠️ A project already exists for storeId: ${storeId}`);
-    broadcastProgress('error', 'A project with this store already exists', 100);
-    return res.status(409).json({
-      error: `A project with storeId "${storeId}" already exists`,
-      existingProjectId: existingProject._id,
-      vercelUrl: existingProject.vercelUrl,
-    });
   }
 
   const localPath = path.join(__dirname, `../tmp/${Date.now()}-${projectName}`);
@@ -104,64 +93,44 @@ exports.deployTheme = async (req, res) => {
     await simpleGit().clone(githubRepoUrl, localPath, ['-b', branch]);
     console.log('✅ Repository cloned successfully');
 
-    // 2. Setup local .env file
-    broadcastProgress('env-setup', 'Setting up local environment...', 30);
-    const accessToken = jwt.sign({ storeId }, process.env.ACCESS_TOKEN_SECRET);
+    // 2. Generate access token early
+    const accessToken = jwt.sign(
+      { storeId },
+      process.env.ACCESS_TOKEN_SECRET
+    );
+
+    // 3. Create updated env vars with STORE_TOKEN
     const updatedEnvVars = {
       ...envVars,
       STORE_TOKEN: accessToken,
     };
 
+    // 4. Write env vars to multiple locations to ensure availability
+    broadcastProgress('env-setup', 'Setting up environment...', 30);
+    console.log('⚙️  Setting up environment variables');
+
+    // Write to .env file
     const envContent = Object.entries(updatedEnvVars)
       .map(([key, value]) => `${key}=${value}`)
       .join('\n');
     await fs.writeFile(path.join(localPath, '.env'), envContent, 'utf8');
 
-    // 3. Create Vercel project if needed
-    broadcastProgress('vercel-project', 'Creating Vercel project...', 40);
-    const projectRes = await axios.post(
-      `${VERCEL_API_BASE}/v9/projects`,
-      { name: projectName },
-      {
-        headers: {
-          Authorization: `Bearer ${VERCEL_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    // Write to .env.production file (for Next.js)
+    await fs.writeFile(path.join(localPath, '.env.production'), envContent, 'utf8');
 
-    const vercelProjectId = projectRes.data.id;
-    console.log(`📁 Vercel project created with ID: ${vercelProjectId}`);
-
-    // 4. Add environment variables to Vercel project
-    broadcastProgress('vercel-env', 'Configuring environment variables in Vercel...', 45);
-    const envPayload = Object.entries(updatedEnvVars).map(([key, value]) => ({
-      key,
-      value,
-      target: ['production'],
-      type: 'plain',
-    }));
-
-    await axios.post(
-      `${VERCEL_API_BASE}/v10/projects/${vercelProjectId}/env`,
-      envPayload,
-      {
-        headers: {
-          Authorization: `Bearer ${VERCEL_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    console.log('✅ Environment variables configured in Vercel');
+    // Write to .env.local file (for local development)
+    await fs.writeFile(path.join(localPath, '.env.local'), envContent, 'utf8');
 
     // 5. Prepare files for deployment
-    broadcastProgress('file-prep', 'Preparing files...', 50);
+    broadcastProgress('file-prep', 'Preparing files...', 40);
+    console.log('📦 Preparing files for deployment...');
     const filePaths = await globby(['**/*'], {
       cwd: localPath,
       gitignore: true,
       dot: true,
       onlyFiles: true,
     });
+    console.log(`📄 Found ${filePaths.length} files to deploy`);
 
     const files = await Promise.all(
       filePaths.map(async (file) => ({
@@ -172,13 +141,12 @@ exports.deployTheme = async (req, res) => {
     );
 
     // 6. Create Vercel deployment
-    broadcastProgress('vercel-deploy', 'Creating Vercel deployment...', 60);
-    // 6. Create Vercel deployment
+    broadcastProgress('vercel-deploy', 'Creating Vercel deployment...', 50);
+    console.log('🚀 Creating Vercel deployment...');
     const deployRes = await axios.post(
       `${VERCEL_API_BASE}/v13/deployments`,
       {
         name: projectName,
-        project: projectName, // ✅ Add this line
         files,
         projectSettings: {
           framework: null,
@@ -186,6 +154,7 @@ exports.deployTheme = async (req, res) => {
           installCommand,
           buildCommand,
           outputDirectory,
+          rootDirectory: null,
         },
         target: 'production',
       },
@@ -196,19 +165,88 @@ exports.deployTheme = async (req, res) => {
         },
       }
     );
-    console.log('✅ Deployment created successfully');
 
-    const { id: deploymentId, url: deploymentUrl } = deployRes.data;
+    const { id: deploymentId, url: deploymentUrl, projectId: vercelProjectId } = deployRes.data;
     console.log(`🎯 Deployment created. ID: ${deploymentId}, URL: ${deploymentUrl}`);
-    broadcastProgress('vercel-created', 'Deployment created in Vercel', 70);
+    broadcastProgress('vercel-created', 'Vercel deployment created', 60);
 
-    // 7. Poll deployment status
+    // 7. Configure environment variables in Vercel (with retry logic)
+    broadcastProgress('env-setup', 'Configuring Vercel environment...', 65);
+    console.log('⚙️  Configuring environment variables in Vercel...');
+
+    const setVercelEnvVars = async (attempt = 1) => {
+      try {
+        await axios.post(
+          `${VERCEL_API_BASE}/v10/projects/${vercelProjectId}/env`,
+          Object.entries(updatedEnvVars).map(([key, value]) => ({
+            key,
+            value,
+            target: ['production', 'preview', 'development'],
+            type: 'encrypted',
+          })),
+          {
+            headers: {
+              Authorization: `Bearer ${VERCEL_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        console.log('✅ Environment variables configured successfully');
+      } catch (envErr) {
+        if (attempt <= 3) {
+          console.log(`⚠️ Retrying environment setup (attempt ${attempt})...`);
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+          return setVercelEnvVars(attempt + 1);
+        }
+        throw envErr;
+      }
+    };
+
+    try {
+      await setVercelEnvVars();
+    } catch (envErr) {
+      console.error('⚠️ Failed to configure environment variables after retries:', envErr.message);
+    }
+
+    // 8. Redeploy to ensure env vars are picked up
+    broadcastProgress('vercel-redeploy', 'Redeploying to apply changes...', 70);
+    console.log('🔄 Redeploying to ensure environment variables are applied...');
+    try {
+      await axios.post(
+        `${VERCEL_API_BASE}/v13/deployments`,
+        {
+          name: projectName,
+          files,
+          projectSettings: {
+            framework: null,
+            devCommand: installCommand ? 'npm run dev' : null,
+            installCommand,
+            buildCommand,
+            outputDirectory,
+            rootDirectory: null,
+          },
+          target: 'production',
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${VERCEL_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      console.log('✅ Redeployment triggered successfully');
+    } catch (redeployErr) {
+      console.error('⚠️ Redeployment failed:', redeployErr.message);
+    }
+
+    // 9. Wait for deployment to complete
     broadcastProgress('vercel-polling', 'Waiting for deployment to complete...', 75);
     const deploymentStatus = await pollDeploymentStatus(deploymentId, startTime);
     broadcastProgress('vercel-ready', 'Deployment completed', 80);
 
-    // 8. Save project to DB
+    // 10. Save project to database
     broadcastProgress('db-save', 'Saving project to database...', 85);
+    console.log('💾 Saving project to database...');
     const createdProject = await Project.create({
       storeId,
       theme,
@@ -220,19 +258,24 @@ exports.deployTheme = async (req, res) => {
       status: deploymentStatus.readyState,
       accessToken,
     });
-
     const projectId = createdProject._id;
     console.log(`📀 Project saved with ID: ${projectId}`);
 
-    // 9. Cleanup local files
+    // 11. Clean up local files
     broadcastProgress('cleanup', 'Cleaning up temporary files...', 90);
+    console.log('🧹 Cleaning up temporary files...');
     await fs.remove(localPath);
 
-    // 10. Link domain
+    // 12. Link domain
     broadcastProgress('domain-link', 'Linking domain...', 95);
+    console.log(`🌐 Attempting to link domain: ${domain}`);
     try {
       const domainResult = await purchaseAndLinkDomain({
-        body: { vercelProjectId, domain, projectId }
+        body: {
+          vercelProjectId,
+          domain,
+          projectId
+        }
       }, {
         status: (code) => ({
           json: (data) => {
@@ -242,22 +285,27 @@ exports.deployTheme = async (req, res) => {
         })
       });
 
-      await Project.findByIdAndUpdate(projectId, { domain });
+      await Project.findByIdAndUpdate(projectId, {
+        domain: domain
+      });
+
       console.log(`🔗 Domain linked successfully: ${domain}`);
       broadcastProgress('domain-success', 'Domain linked successfully', 98);
     } catch (domainErr) {
       console.error('⚠️ Domain linking failed:', domainErr.message);
       await Project.findByIdAndUpdate(projectId, {
-        domain,
+        domain: domain,
         domainError: domainErr.message
       });
       broadcastProgress('domain-failed', 'Domain linking failed', 98);
     }
 
+    // 13. Calculate total time
     const totalTime = Math.floor((Date.now() - startTime) / 1000);
-    broadcastProgress('complete', 'Deployment completed successfully', 100);
     console.log(`🏁 Deployment process completed in ${totalTime} seconds`);
+    broadcastProgress('complete', 'Deployment completed successfully', 100);
 
+    // 14. Respond to client
     return res.status(201).json({
       message: 'Deployed and built successfully 🎉',
       domain,
