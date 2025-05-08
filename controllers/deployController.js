@@ -144,7 +144,7 @@ exports.deployTheme = async (req, res) => {
       `${VERCEL_API_BASE}/v9/projects`,
       {
         name: projectName,
-        framework: null,
+        framework: 'nextjs',
         buildCommand,
         installCommand,
         outputDirectory,
@@ -196,7 +196,7 @@ exports.deployTheme = async (req, res) => {
         // projectId: vercelProjectId, // this links it to the created project
         files,
         projectSettings: {
-          framework: null,
+          framework: 'nextjs',
           devCommand: installCommand ? 'npm run dev' : null,
           installCommand,
           buildCommand,
