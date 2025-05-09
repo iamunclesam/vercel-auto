@@ -75,7 +75,15 @@ exports.deployTheme = async (req, res) => {
     envVars = {}
   } = req.body;
 
-  const githubToken = process.env.GITHUB_TOKEN
+  const githubToken = process.env.GITHUB_TOKEN;
+  const vercelToken = process.env.VERCEL_API_TOKEN;
+
+  // Validate Vercel token
+  if (!vercelToken) {
+    console.error('❌ Missing VERCEL_TOKEN');
+    broadcastProgress('error', 'Missing VERCEL_TOKEN', 100);
+    return res.status(500).json({ error: 'Server configuration error: Missing VERCEL_TOKEN' });
+  }
 
   if (!storeId || !githubRepoUrl || !projectName || !theme || !domain || !githubToken) {
     console.error('❌ Missing required fields (storeId, githubRepoUrl, githubToken, etc.)');
@@ -83,7 +91,14 @@ exports.deployTheme = async (req, res) => {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  const localPath = path.join(__dirname, `../tmp/${Date.now()}-${projectName}`);
+  // Sanitize project name for Vercel (alphanumeric and hyphens only)
+  const sanitizedProjectName = projectName
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  const localPath = path.join(__dirname, `../tmp/${Date.now()}-${sanitizedProjectName}`);
   console.log(`📂 Using temporary directory: ${localPath}`);
 
   try {
@@ -98,6 +113,12 @@ exports.deployTheme = async (req, res) => {
     console.log(`⏳ Cloning repository from ${githubRepoUrl} using branch ${branch}...`);
     await simpleGit().clone(secureRepoUrl, localPath, ['-b', branch]);
     console.log('✅ Repository cloned successfully');
+
+    // Check if package.json exists
+    const packageJsonPath = path.join(localPath, 'package.json');
+    if (!fs.existsSync(packageJsonPath)) {
+      throw new Error('package.json not found in repository. Cannot deploy a non-Node.js project.');
+    }
 
     // 2. Generate access token
     const accessToken = jwt.sign({ storeId }, process.env.ACCESS_TOKEN_SECRET);
@@ -127,6 +148,7 @@ exports.deployTheme = async (req, res) => {
     });
 
     if (filePaths.length === 0) throw new Error('No files found to deploy.');
+    console.log(`Found ${filePaths.length} files to deploy`);
 
     const files = await Promise.all(
       filePaths.map(async (file) => ({
@@ -136,32 +158,86 @@ exports.deployTheme = async (req, res) => {
       }))
     );
 
-    // 🔁 NEW: 5. Create Vercel project (before any deployment)
+    // 5. Create Vercel project with a scoped unique name
+    const scopedProjectName = `${sanitizedProjectName}-${storeId.slice(0, 8)}`;
     broadcastProgress('vercel-project', 'Creating Vercel project...', 45);
-    console.log('📁 Creating Vercel project...');
+    console.log(`📁 Creating Vercel project with name: ${scopedProjectName}...`);
 
-    const createProjectRes = await axios.post(
-      `${VERCEL_API_BASE}/v9/projects`,
-      {
-        name: projectName,
-        framework: 'nextjs',
-        buildCommand,
-        installCommand,
-        outputDirectory,
-        rootDirectory: null,
-      },
-      {
+    // Test Vercel API connection first
+    try {
+      const testResponse = await axios.get(`${VERCEL_API_BASE}/v2/user`, {
         headers: {
-          Authorization: `Bearer ${VERCEL_TOKEN}`,
+          Authorization: `Bearer ${vercelToken}`,
           'Content-Type': 'application/json',
         },
+      });
+      console.log('✅ Vercel API connection successful');
+    } catch (testError) {
+      console.error('❌ Vercel API connection test failed:', testError.message);
+      if (testError.response) {
+        console.error('Response data:', testError.response.data);
+        console.error('Response status:', testError.response.status);
       }
-    );
+      throw new Error(`Vercel API connection failed: ${testError.message}`);
+    }
 
-    const { id: vercelProjectId } = createProjectRes.data;
-    console.log(`✅ Vercel project created with ID: ${vercelProjectId}`);
+    // Check if project exists first to avoid duplicates
+    let vercelProjectId;
+    try {
+      const checkProjectRes = await axios.get(
+        `${VERCEL_API_BASE}/v11/projects/${scopedProjectName}`,
+        {
+          headers: {
+            Authorization: `Bearer ${vercelToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      vercelProjectId = checkProjectRes.data.id;
+      console.log(`✅ Vercel project already exists with ID: ${vercelProjectId}`);
+    } catch (projectError) {
+      if (projectError.response && projectError.response.status === 404) {
+        console.log('Project does not exist yet, creating new project...');
+        try {
+          // Project doesn't exist, create a new one
+          const createProjectRes = await axios.post(
+            `${VERCEL_API_BASE}/v11/projects`,
+            {
+              name: scopedProjectName,
+              framework: 'nextjs',
+              buildCommand,
+              installCommand,
+              outputDirectory,
+              rootDirectory: null,
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${vercelToken}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+          vercelProjectId = createProjectRes.data.id;
+          console.log(`✅ Vercel project created with ID: ${vercelProjectId}`);
+        } catch (createError) {
+          console.error('❌ Project creation failed:', createError.message);
+          if (createError.response) {
+            console.error('Response data:', createError.response.data);
+            console.error('Response status:', createError.response.status);
+          }
+          throw new Error(`Project creation failed: ${createError.message}`);
+        }
+      } else {
+        console.error('❌ Error checking project existence:', projectError.message);
+        if (projectError.response) {
+          console.error('Response data:', projectError.response.data);
+          console.error('Response status:', projectError.response.status);
+        }
+        throw new Error(`Error checking project existence: ${projectError.message}`);
+      }
+    }
 
-    // 🔁 NEW: 6. Set env vars BEFORE deployment
+    // 6. Set env vars BEFORE deployment
     broadcastProgress('env-vercel', 'Configuring environment in Vercel...', 50);
     console.log('⚙️ Sending environment variables to Vercel...');
 
@@ -172,52 +248,89 @@ exports.deployTheme = async (req, res) => {
       type: 'encrypted',
     }));
 
-    await axios.post(
-      `${VERCEL_API_BASE}/v10/projects/${vercelProjectId}/env`,
-      vercelEnvPayload,
-      {
-        headers: {
-          Authorization: `Bearer ${VERCEL_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
+    try {
+      await axios.post(
+        `${VERCEL_API_BASE}/v10/projects/${vercelProjectId}/env`,
+        vercelEnvPayload,
+        {
+          headers: {
+            Authorization: `Bearer ${vercelToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      console.log('✅ Vercel environment variables configured');
+    } catch (envError) {
+      console.warn('⚠️ Error setting environment variables:', envError.message);
+      if (envError.response) {
+        console.warn('Response data:', envError.response.data);
+        console.warn('Response status:', envError.response.status);
       }
-    );
+      // Continue even if env vars fail - not critical
+    }
 
-    console.log('✅ Vercel environment variables configured');
-
-    // 🔁 NEW: 7. Now deploy the code
+    // 7. Now deploy the code with proper project linking
     broadcastProgress('vercel-deploy', 'Creating Vercel deployment...', 60);
     console.log('🚀 Sending files to Vercel...');
 
-    const deployRes = await axios.post(
-      `${VERCEL_API_BASE}/v13/deployments`,
-      {
-        name: projectName,
-        // projectId: vercelProjectId, // this links it to the created project
-        files,
-        projectSettings: {
+    let deployRes;
+    try {
+      // Try deployment with full set of parameters first
+      console.log(`Attempting deployment for project ID: ${vercelProjectId}`);
+      deployRes = await axios.post(
+        `${VERCEL_API_BASE}/v13/deployments`,
+        {
+          name: scopedProjectName,
+          // projectId: vercelProjectId,
+          files,
+          target: 'production',
           framework: 'nextjs',
-          devCommand: installCommand ? 'npm run dev' : null,
-          installCommand,
-          buildCommand,
-          outputDirectory,
-          rootDirectory: null,
         },
-        target: 'production',
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${VERCEL_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
+        {
+          headers: {
+            Authorization: `Bearer ${vercelToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+    } catch (deployError) {
+      console.error('❌ Initial deployment attempt failed:', deployError.message);
+      if (deployError.response) {
+        console.error('Response data:', deployError.response.data);
+        console.error('Response status:', deployError.response.status);
       }
-    );
+
+      // Try simplified deployment as fallback
+      console.log('Attempting simplified deployment as fallback...');
+      try {
+        deployRes = await axios.post(
+          `${VERCEL_API_BASE}/v13/deployments`,
+          {
+            name: scopedProjectName,
+            // projectId: vercelProjectId,
+            files,
+            target: 'production',
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${vercelToken}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+      } catch (fallbackError) {
+        console.error('❌ Fallback deployment also failed:', fallbackError.message);
+        if (fallbackError.response) {
+          console.error('Response data:', fallbackError.response.data);
+          console.error('Response status:', fallbackError.response.status);
+        }
+        throw new Error(`Deployment failed: ${fallbackError.message}`);
+      }
+    }
 
     const { id: deploymentId, url: deploymentUrl } = deployRes.data;
+    console.log(`✅ Deployment created with ID: ${deploymentId} and URL: ${deploymentUrl}`);
     broadcastProgress('vercel-created', 'Vercel deployment created', 70);
-
-    // 🧹 REMOVED: The extra redeploy step you had before (you can now delete it)
-
 
     // 8. Poll deployment
     broadcastProgress('vercel-polling', 'Polling for deployment status...', 75);
@@ -229,7 +342,7 @@ exports.deployTheme = async (req, res) => {
       storeId,
       theme,
       githubRepoUrl,
-      projectName,
+      projectName: scopedProjectName,
       vercelProjectId,
       vercelUrl: deploymentUrl,
       createdAt: new Date(),
