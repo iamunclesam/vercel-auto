@@ -4,6 +4,7 @@ const { broadcastProgress } = require('../utils/progressTracker');
 const simpleGit = require('simple-git');
 const path = require('path');
 const fs = require('fs-extra');
+const os = require('os'); // Added for cross-platform temp dirs
 const axios = require('axios');
 const { globby } = require('globby');
 const Project = require('../models/Project');
@@ -11,7 +12,10 @@ const { purchaseAndLinkDomain } = require('./domainController');
 
 const VERCEL_API_BASE = 'https://api.vercel.com';
 const VERCEL_TOKEN = process.env.VERCEL_API_TOKEN;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const jwt = require('jsonwebtoken');
+
+
 
 // Helper function with detailed logging
 const pollDeploymentStatus = async (deploymentId, startTime) => {
@@ -418,6 +422,107 @@ exports.deployTheme = async (req, res) => {
     });
   }
 };
+
+
+
+// Helper function to create Git credentials in Vercel
+// async function createGitCredentialIfNeeded(repoOwner, repoName) {
+//   try {
+//     // Check if credential already exists
+//     const { data: credentials } = await axios.get(
+//       `${VERCEL_API_BASE}/v1/integrations/git-credentials`,
+//       {
+//         headers: {
+//           Authorization: `Bearer ${VERCEL_TOKEN}`,
+//         },
+//       }
+//     );
+
+//     const existingCred = credentials.find(c => c.name.includes(repoOwner));
+//     if (existingCred) return existingCred.id;
+
+//     // Create new credential if needed
+//     const { data: newCred } = await axios.post(
+//       `${VERCEL_API_BASE}/v1/integrations/git-credentials`,
+//       {
+//         type: 'github',
+//         name: `${repoOwner}-${repoName}-${Date.now()}`,
+//         username: 'x-access-token',
+//         password: GITHUB_TOKEN
+//       },
+//       {
+//         headers: {
+//           Authorization: `Bearer ${VERCEL_TOKEN}`,
+//           'Content-Type': 'application/json',
+//         },
+//       }
+//     );
+
+//     return newCred.id;
+//   } catch (error) {
+//     console.warn('⚠️ Could not create Git credential:', error.message);
+//     return null;
+//   }
+// }
+
+// exports.updateProjectsByTheme = async (req, res) => {
+//   const { themeId } = req.body;
+
+//   try {
+//     const projects = await Project.find({ theme: themeId });
+//     if (!projects.length) {
+//       return res.status(404).json({ message: 'No projects found' });
+//     }
+
+//     const results = await Promise.all(
+//       projects.map(async (project) => {
+//         if (!project.vercelProjectId) {
+//           return {
+//             projectId: project._id,
+//             status: 'skipped',
+//             reason: 'Missing Vercel project ID'
+//           };
+//         }
+
+//         const result = await triggerVercelDeployment(project);
+//         if (result.success) {
+//           await Project.findByIdAndUpdate(project._id, {
+//             $set: { lastDeployed: new Date() },
+//             $push: {
+//               deployments: {
+//                 deploymentId: result.deploymentId,
+//                 url: result.url,
+//                 date: new Date(),
+//                 source: 'github',
+//                 branch: project.branch || 'main',
+//                 derivedName: result.derivedProjectName
+//               }
+//             }
+//           });
+//         }
+
+//         return {
+//           projectId: project._id,
+//           domain: project.domain,
+//           status: result.success ? 'success' : 'failed',
+//           ...result
+//         };
+//       })
+//     );
+
+//     return res.json({
+//       message: 'Deployments processed',
+//       results
+//     });
+//   } catch (error) {
+//     console.error('Deployment error:', error);
+//     return res.status(500).json({
+//       error: 'Deployment failed',
+//       details: error.message
+//     });
+//   }
+// };
+
 
 
 // Get all projects

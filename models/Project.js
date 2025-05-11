@@ -20,6 +20,10 @@ const projectSchema = new mongoose.Schema({
     required: true
   },
   deploymentId: { type: String },
+  projectName: {
+    type: String,
+    required: true
+  },
   usage: {
     bandwidth: Number,
     requests: Number,

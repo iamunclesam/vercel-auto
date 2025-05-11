@@ -1,11 +1,14 @@
 const router = require('express').Router();
 const deployController = require('../controllers/deployController');
+const updateController = require('../controllers/bulkDeployUpdate');
 const { addClient, removeClient } = require('../utils/progressTracker');
 // Store connected clients
 const clients = new Set();
 
 // Deployment endpoint
 router.post('/deploy', deployController.deployTheme);
+
+router.post('/deploy/update', updateController.updateProjectsByTheme);
 
 router.get('/project/:storeId', deployController.getProjectsByStoreId);
 
