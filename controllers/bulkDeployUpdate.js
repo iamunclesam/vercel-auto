@@ -28,6 +28,116 @@ function sanitizeProjectName(input) {
         .substring(0, 100);              // Trim to 100 chars
 }
 
+/**
+ * Get existing Vercel project by name or create a new one if it doesn't exist
+ * @param {string} projectName - Sanitized project name
+ * @param {Object} project - MongoDB project document
+ * @returns {Promise<{projectId: string, vercelProjectName: string, success: boolean, error?: string}>}
+ */
+async function getOrCreateVercelProject(projectName, project) {
+    try {
+        // First check if we already have a Vercel project ID stored in our database
+        if (project.vercelProjectId) {
+            console.log(`📂 Using stored Vercel project ID: ${project.vercelProjectId}`);
+            
+            try {
+                // Verify the project still exists in Vercel
+                const projectResponse = await axios.get(
+                    `${VERCEL_API_BASE}/v9/projects/${project.vercelProjectId}`,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${VERCEL_TOKEN}`
+                        }
+                    }
+                );
+                
+                // Return the existing project ID and name
+                return {
+                    success: true,
+                    projectId: project.vercelProjectId,
+                    vercelProjectName: projectResponse.data.name
+                };
+            } catch (error) {
+                // If project doesn't exist anymore, continue with normal flow
+                console.log(`⚠️ Stored Vercel project ID not found: ${error.message}`);
+            }
+        }
+        
+        // Try to find the project by name or domain
+        const projectListResponse = await axios.get(
+            `${VERCEL_API_BASE}/v9/projects`,
+            {
+                headers: {
+                    Authorization: `Bearer ${VERCEL_TOKEN}`
+                }
+            }
+        );
+
+        // First try to find by domain if available
+        let existingProject = null;
+        if (project.domain) {
+            existingProject = projectListResponse.data.projects.find(
+                p => p.targets?.production?.alias?.includes(project.domain) ||
+                     p.alias?.includes(project.domain)
+            );
+            
+            if (existingProject) {
+                console.log(`🔍 Found Vercel project by domain: ${project.domain}`);
+            }
+        }
+        
+        // If not found by domain, try by name
+        if (!existingProject) {
+            existingProject = projectListResponse.data.projects.find(
+                p => p.name === projectName
+            );
+            
+            if (existingProject) {
+                console.log(`🔍 Found Vercel project by name: ${projectName}`);
+            }
+        }
+
+        if (existingProject) {
+            return {
+                success: true,
+                projectId: existingProject.id,
+                vercelProjectName: existingProject.name
+            };
+        }
+
+        // If project doesn't exist, create a new one
+        console.log(`🆕 Creating new Vercel project: ${projectName}`);
+        const createResponse = await axios.post(
+            `${VERCEL_API_BASE}/v9/projects`,
+            {
+                name: projectName,
+                framework: project.framework || 'nextjs' // Default framework
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${VERCEL_TOKEN}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        return {
+            success: true,
+            projectId: createResponse.data.id,
+            vercelProjectName: createResponse.data.name
+        };
+    } catch (error) {
+        console.error('Error getting/creating Vercel project:', error.message);
+        return {
+            success: false,
+            error: error.message
+        };
+    }
+}
+
+/**
+ * Trigger a redeployment of an existing Vercel project
+ */
 async function triggerVercelDeployment(project, options = {}) {
     let localPath = null;
     const { githubRepoUrl, githubToken } = options;
@@ -36,6 +146,16 @@ async function triggerVercelDeployment(project, options = {}) {
         const sanitizedProjectName = sanitizeProjectName(
             project.name || project.domain || `project-${project._id.toString().slice(-6)}`
         );
+
+        // Step 1: Get or create the Vercel project to get project ID
+        const vercelProjectResult = await getOrCreateVercelProject(sanitizedProjectName, project);
+        if (!vercelProjectResult.success) {
+            throw new Error(`Failed to get/create Vercel project: ${vercelProjectResult.error}`);
+        }
+
+        const projectId = vercelProjectResult.projectId;
+        const vercelProjectName = vercelProjectResult.vercelProjectName;
+        console.log(`📁 Working with Vercel project ID: ${projectId}, name: ${vercelProjectName}`);
 
         localPath = path.join(__dirname, `../tmp/${Date.now()}-${sanitizedProjectName}`);
 
@@ -49,7 +169,6 @@ async function triggerVercelDeployment(project, options = {}) {
             onlyFiles: true
         });
 
-
         if (filePaths.length === 0) throw new Error('No files found to deploy.');
         console.log(`Found ${filePaths.length} files to deploy`);
 
@@ -61,18 +180,39 @@ async function triggerVercelDeployment(project, options = {}) {
             }))
         );
 
+        // Check if we have a previous deployment to redeploy
+        let previousDeploymentId = null;
+        if (project.deployments && project.deployments.length > 0) {
+            // Get the latest deployment ID
+            previousDeploymentId = project.deployments[project.deployments.length - 1].deploymentId;
+            console.log(`🔄 Found previous deployment ID: ${previousDeploymentId}`);
+        }
+
+        // Setup the deployment payload according to v13 API docs
         const deploymentPayload = {
-            name: sanitizedProjectName,
-            // projectId: project.vercelProjectId,
+            // IMPORTANT: Use the vercelProjectName, not our sanitized name to ensure match
+            name: vercelProjectName,
             target: 'production',
             files: files,
-            buildCommand: project.buildCommand || 'npm run build',
-            installCommand: project.installCommand || 'npm install',
-            framework: project.framework || 'nextjs'
+            project: projectId, // According to docs, use 'project' rather than 'projectId'
+       
+                framework: project.framework || 'nextjs',
+                buildCommand: project.buildCommand || 'npm run build',
+                devCommand: project.devCommand || 'npm run dev',
+                installCommand: project.installCommand || 'npm install --legacy-peer-deps --force',
+                outputDirectory: project.outputDirectory || 'out',
+                rootDirectory: null
+            
         };
+        
+        // If we have a previous deployment, use the deploymentId param to redeploy it
+        if (previousDeploymentId) {
+            deploymentPayload.deploymentId = previousDeploymentId;
+        }
 
         console.log('🚀 Starting deployment');
 
+        // Use v13 endpoint as per documentation
         const response = await axios.post(
             `${VERCEL_API_BASE}/v13/deployments`,
             deploymentPayload,
@@ -81,7 +221,7 @@ async function triggerVercelDeployment(project, options = {}) {
                     Authorization: `Bearer ${VERCEL_TOKEN}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 30000
+                timeout: 60000 // Increased timeout for larger projects
             }
         );
 
@@ -89,10 +229,12 @@ async function triggerVercelDeployment(project, options = {}) {
             success: true,
             deploymentId: response.data.id,
             url: response.data.url,
+            projectId: projectId,
             githubRepoUrl
         };
 
     } catch (error) {
+        console.error('Deployment error:', error.message);
         return {
             success: false,
             error: error.message,
@@ -109,45 +251,66 @@ async function triggerVercelDeployment(project, options = {}) {
 
 exports.updateProjectsByTheme = async (req, res) => {
     try {
+        // Track and broadcast progress
+        broadcastProgress('update-theme-projects', { status: 'started', progress: 0 });
+        
         const projects = await Project.find({ theme: req.body.themeId });
 
         if (!projects.length) {
+            broadcastProgress('update-theme-projects', { status: 'completed', progress: 100, message: 'No projects found' });
             return res.status(404).json({ error: 'No projects found for this theme' });
         }
 
         const githubRepoUrl = 'https://github.com/iamunclesam/multi-purpose-ecommerce';
         const githubToken = process.env.GITHUB_TOKEN; // don't expose this in response
 
-        const results = await Promise.all(
-            projects.map(async project => {
-                const result = await triggerVercelDeployment(project, {
-                    githubRepoUrl,
-                    githubToken
-                });
+        let completedCount = 0;
+        const results = [];
 
-                if (result.success) {
-                    await Project.findByIdAndUpdate(project._id, {
-                        $set: { lastDeployed: new Date() },
-                        $push: {
-                            deployments: {
-                                deploymentId: result.deploymentId,
-                                url: result.url,
-                                date: new Date(),
-                                source: 'github',
-                                branch: project.branch || 'main'
-                            }
+        for (const project of projects) {
+            // Update progress as we go
+            broadcastProgress('update-theme-projects', { 
+                status: 'in-progress', 
+                progress: Math.floor((completedCount / projects.length) * 100),
+                message: `Deploying project ${completedCount + 1} of ${projects.length}`
+            });
+
+            const result = await triggerVercelDeployment(project, {
+                githubRepoUrl,
+                githubToken
+            });
+
+            if (result.success) {
+                // Update the project with the Vercel project ID for future deployments
+                await Project.findByIdAndUpdate(project._id, {
+                    $set: { 
+                        lastDeployed: new Date(),
+                        vercelProjectId: result.projectId // Store for future use
+                    },
+                    $push: {
+                        deployments: {
+                            deploymentId: result.deploymentId,
+                            url: result.url,
+                            projectId: result.projectId,
+                            date: new Date(),
+                            source: 'github',
+                            branch: project.branch || 'main'
                         }
-                    });
-                }
+                    }
+                });
+            }
 
-                return {
-                    projectId: project._id,
-                    domain: project.domain,
-                    status: result.success ? 'success' : 'failed',
-                    ...result
-                };
-            })
-        );
+            results.push({
+                projectId: project._id,
+                domain: project.domain,
+                status: result.success ? 'success' : 'failed',
+                ...result
+            });
+
+            completedCount++;
+        }
+
+        broadcastProgress('update-theme-projects', { status: 'completed', progress: 100 });
 
         return res.json({
             message: 'Deployments processed',
@@ -156,6 +319,13 @@ exports.updateProjectsByTheme = async (req, res) => {
 
     } catch (error) {
         console.error('Controller error:', error);
+        
+        // Send error progress
+        broadcastProgress('update-theme-projects', { 
+            status: 'error', 
+            message: error.message
+        });
+        
         return res.status(500).json({
             error: 'Internal server error',
             details: error.message
