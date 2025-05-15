@@ -200,9 +200,7 @@ async function triggerVercelDeployment(project, options = {}) {
                 buildCommand: project.buildCommand || 'npm run build',
                 devCommand: project.devCommand || 'npm run dev',
                 installCommand: project.installCommand || 'npm install --legacy-peer-deps --force',
-                outputDirectory: project.outputDirectory || 'out',
-                rootDirectory: null
-            
+                outputDirectory: '.next',
         };
         
         // If we have a previous deployment, use the deploymentId param to redeploy it
