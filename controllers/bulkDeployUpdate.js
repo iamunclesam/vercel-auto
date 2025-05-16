@@ -254,7 +254,7 @@ exports.updateProjectsByTheme = async (req, res) => {
         
         const projects = await Project.find({ theme: req.body.themeId });
 
-        if (!projects.length) {
+        if (!projects) {
             broadcastProgress('update-theme-projects', { status: 'completed', progress: 100, message: 'No projects found' });
             return res.status(404).json({ error: 'No projects found for this theme' });
         }
