@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const os = require('os'); // Added for cross-platform temp dirs
 const axios = require('axios');
-const { globby } = require('globby');
+// const { globby } = require('globby'); // Removed due to ESM issue
 const Project = require('../models/Project');
 const { purchaseAndLinkDomain } = require('./domainController');
 
@@ -162,6 +162,8 @@ async function triggerVercelDeployment(project, options = {}) {
         // ⬇️ Clone the GitHub repo into the localPath
         await simpleGit().clone(githubRepoUrl, localPath);
 
+        // Dynamic import for globby to handle ESM module
+        const { globby } = await import('globby');
         const filePaths = await globby(['**/*'], {
             cwd: localPath,
             gitignore: true,
@@ -247,85 +249,85 @@ async function triggerVercelDeployment(project, options = {}) {
     }
 }
 
-exports.updateProjectsByTheme = async (req, res) => {
+exports.bulkDeployUpdate = async (req, res) => {
     try {
-        // Track and broadcast progress
-        broadcastProgress('update-theme-projects', { status: 'started', progress: 0 });
-        
-        const projects = await Project.find({ theme: req.body.themeId });
+        const { themeId } = req.body;
 
-        if (!projects) {
-            broadcastProgress('update-theme-projects', { status: 'completed', progress: 100, message: 'No projects found' });
-            return res.status(404).json({ error: 'No projects found for this theme' });
+        if (!themeId) {
+            return res.status(400).json({ error: 'Theme ID is required' });
         }
 
-        const githubRepoUrl = 'https://github.com/iamunclesam/multi-purpose-ecommerce';
-        const githubToken = process.env.GITHUB_TOKEN; // don't expose this in response
+        const projects = await Project.find({ theme: themeId });
+        if (!projects.length) {
+            return res.status(404).json({ message: 'No projects found for this theme' });
+        }
 
-        let completedCount = 0;
-        const results = [];
+        const results = await Promise.all(
+            projects.map(async (project) => {
+                if (!project.vercelProjectId) {
+                    return {
+                        projectId: project._id,
+                        status: 'skipped',
+                        reason: 'Missing Vercel project ID'
+                    };
+                }
 
-        for (const project of projects) {
-            // Update progress as we go
-            broadcastProgress('update-theme-projects', { 
-                status: 'in-progress', 
-                progress: Math.floor((completedCount / projects.length) * 100),
-                message: `Deploying project ${completedCount + 1} of ${projects.length}`
-            });
-
-            const result = await triggerVercelDeployment(project, {
-                githubRepoUrl,
-                githubToken
-            });
-
-            if (result.success) {
-                // Update the project with the Vercel project ID for future deployments
-                await Project.findByIdAndUpdate(project._id, {
-                    $set: { 
-                        lastDeployed: new Date(),
-                        vercelProjectId: result.projectId // Store for future use
-                    },
-                    $push: {
-                        deployments: {
-                            deploymentId: result.deploymentId,
-                            url: result.url,
-                            projectId: result.projectId,
-                            date: new Date(),
-                            source: 'github',
-                            branch: project.branch || 'main'
-                        }
+                try {
+                    const result = await triggerVercelDeployment(project);
+                    
+                    if (result.success) {
+                        await Project.findByIdAndUpdate(project._id, {
+                            $set: { lastDeployed: new Date() },
+                            $push: {
+                                deployments: {
+                                    deploymentId: result.deploymentId,
+                                    url: result.url,
+                                    date: new Date(),
+                                    source: 'github',
+                                    branch: project.branch || 'main',
+                                    derivedName: result.derivedProjectName
+                                }
+                            }
+                        });
                     }
-                });
-            }
 
-            results.push({
-                projectId: project._id,
-                domain: project.domain,
-                status: result.success ? 'success' : 'failed',
-                ...result
-            });
+                    return {
+                        projectId: project._id,
+                        domain: project.domain,
+                        status: result.success ? 'success' : 'failed',
+                        ...result
+                    };
+                } catch (error) {
+                    console.error(`Deployment failed for project ${project._id}:`, error.message);
+                    return {
+                        projectId: project._id,
+                        domain: project.domain,
+                        status: 'failed',
+                        error: error.message
+                    };
+                }
+            })
+        );
 
-            completedCount++;
-        }
-
-        broadcastProgress('update-theme-projects', { status: 'completed', progress: 100 });
+        const successful = results.filter(r => r.status === 'success');
+        const failed = results.filter(r => r.status === 'failed');
+        const skipped = results.filter(r => r.status === 'skipped');
 
         return res.json({
-            message: 'Deployments processed',
+            message: 'Bulk deployment completed',
+            summary: {
+                total: results.length,
+                successful: successful.length,
+                failed: failed.length,
+                skipped: skipped.length
+            },
             results
         });
 
     } catch (error) {
-        console.error('Controller error:', error);
-        
-        // Send error progress
-        broadcastProgress('update-theme-projects', { 
-            status: 'error', 
-            message: error.message
-        });
-        
+        console.error('Bulk deployment error:', error);
         return res.status(500).json({
-            error: 'Internal server error',
+            error: 'Bulk deployment failed',
             details: error.message
         });
     }

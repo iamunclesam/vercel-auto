@@ -1,26 +1,35 @@
 const mongoose = require('mongoose');
 
 const domainSchema = new mongoose.Schema({
-  name: { 
-    type: String, 
-    required: true },
-  project: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Project', 
-    required: true },
-  provider: { 
-    type: String, 
-    enum: ['vercel'],
-    default: 'vercel', 
-    required: true },
-  purchaseStatus: { 
-    type: String, 
-    enum: ['pending', 'success', 'failed'], 
-    default: 'pending' },
-  connected: { 
-    type: Boolean, 
-    default: false },
-  purchasedAt: Date
+  name: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  projectId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Project',
+    required: true
+  },
+  vercelProjectId: {
+    type: String,
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['pending', 'active', 'error'],
+    default: 'pending'
+  },
+  purchased: {
+    type: Boolean,
+    default: false
+  },
+  purchaseDate: Date,
+  error: String,
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
 });
 
 module.exports = mongoose.model('Domain', domainSchema);

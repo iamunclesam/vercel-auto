@@ -1,29 +1,34 @@
 // utils/progressTracker.js
 const clients = new Set();
 
-function broadcastProgress(stage, message, percentage) {
-    const progressData = JSON.stringify({ stage, message, percentage });
+function addClient(client) {
+    clients.add(client);
+}
+
+function removeClient(client) {
+    clients.delete(client);
+}
+
+function broadcastProgress(event, message, progress) {
+    const data = JSON.stringify({
+        event,
+        message,
+        progress,
+        timestamp: new Date().toISOString()
+    });
+
     clients.forEach(client => {
         try {
-            client.write(`event: progress\ndata: ${progressData}\n\n`);
-        } catch (err) {
-            // Remove broken connections
-            clients.delete(client);
+            client.write(`data: ${data}\n\n`);
+        } catch (error) {
+            console.error('Error sending progress to client:', error.message);
+            removeClient(client);
         }
     });
 }
 
-function addClient(res) {
-    clients.add(res);
-}
-
-function removeClient(res) {
-    clients.delete(res);
-}
-
 module.exports = {
-    broadcastProgress,
     addClient,
     removeClient,
-    clients
+    broadcastProgress
 };

@@ -2,23 +2,18 @@ const express = require('express');
 const dotenv = require('dotenv').config();
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const mongoose = require('mongoose'); // Add Mongoose
+const mongoose = require('mongoose');
 const http = require('http');
 const deployRoutes = require('./routes/deployRoutes');
 const domainRoutes = require('./routes/domainRoutes');
 const usageRoutes = require('./routes/usageRoutes');
-// const connectDB = require('./config/db')
+const resourceRoutes = require('./routes/resourceRoutes');
 
-// Starting app
 const app = express();
 
-// Connect to MongoDB
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    const conn = await mongoose.connect(process.env.MONGO_URI);
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
     console.error(`Error: ${error.message}`);
@@ -26,13 +21,10 @@ const connectDB = async () => {
   }
 };
 
-// Middlewares - ORDER MATTERS!
-// 1. First add body parsers
-app.use(express.json()); // for parsing application/json
-app.use(express.urlencoded({ extended: true })); // for parsing application/x-www-form-urlencoded
-app.use(bodyParser.json()); // body-parser (can be removed as express.json() is preferred now)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 
-// 2. Then add CORS
 app.use(cors({
     origin: "*",
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
@@ -40,22 +32,19 @@ app.use(cors({
     credentials: true
 }));
 
-// 3. Then add routes
 app.use('/api/deploy', deployRoutes);
 app.use('/api/domain', domainRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/resources', resourceRoutes);
 
-// Other settings
 app.set('trust proxy', false);
 
-// Test route
 app.get('/', (req, res) => {
     res.status(200).json('Welcome to Vercel Theme Deployer');
 });
 
 const PORT = process.env.PORT || 5050;
 
-// Connect to the database before listening
 connectDB().then(() => {
   app.listen(PORT, () => {
     console.log('Listening for requests on', PORT);

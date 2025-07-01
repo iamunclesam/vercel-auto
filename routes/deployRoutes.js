@@ -1,35 +1,11 @@
-const router = require('express').Router();
-const deployController = require('../controllers/deployController');
-const updateController = require('../controllers/bulkDeployUpdate');
-const { addClient, removeClient } = require('../utils/progressTracker');
-// Store connected clients
-const clients = new Set();
+const express = require('express');
+const router = express.Router();
+const { deployTheme, getAllProjects, getProjectsByStoreId } = require('../controllers/deployController');
+const { bulkDeployUpdate } = require('../controllers/bulkDeployUpdate');
 
-// Deployment endpoint
-router.post('/deploy', deployController.deployTheme);
-
-router.post('/deploy/update', updateController.updateProjectsByTheme);
-
-router.get('/project/:storeId', deployController.getProjectsByStoreId);
-
-router.get('/progress', (req, res) => {
-    res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-    });
-
-    // Send initial connection message
-    res.write('event: connected\ndata: \n\n');
-
-    // Add client to tracking
-    addClient(res);
-
-    // Remove client when connection closes
-    req.on('close', () => {
-        removeClient(res);
-        res.end();
-    });
-});
+router.post('/deploy', deployTheme);
+router.get('/projects', getAllProjects);
+router.get('/projects/:storeId', getProjectsByStoreId);
+router.post('/bulk-update', bulkDeployUpdate);
 
 module.exports = router;

@@ -1,26 +1,22 @@
-// At the top of your file, add the router import
 const { broadcastProgress } = require('../utils/progressTracker');
-
 const simpleGit = require('simple-git');
 const path = require('path');
 const fs = require('fs-extra');
-const os = require('os'); // Added for cross-platform temp dirs
+const os = require('os');
 const axios = require('axios');
-const { globby } = require('globby');
 const Project = require('../models/Project');
 const { purchaseAndLinkDomain } = require('./domainController');
+const { createSubdomainCNAME } = require('../utils/cloudflare');
 
 const VERCEL_API_BASE = 'https://api.vercel.com';
 const VERCEL_TOKEN = process.env.VERCEL_API_TOKEN;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const PARENT_DOMAIN = process.env.PARENT_DOMAIN || 'zenithstudio.ng';
 const jwt = require('jsonwebtoken');
 
-
-
-// Helper function with detailed logging
 const pollDeploymentStatus = async (deploymentId, startTime) => {
   const maxTries = 20;
-  const interval = 5000; // 5 seconds
+  const interval = 5000;
   let tries = 0;
 
   console.log(`⌛ Starting deployment monitoring for ID: ${deploymentId}`);
@@ -45,7 +41,25 @@ const pollDeploymentStatus = async (deploymentId, startTime) => {
       }
 
       if (['ERROR', 'CANCELED'].includes(status.readyState)) {
-        throw new Error(`Deployment failed with status: ${status.readyState}`);
+        console.error(`❌ Deployment failed with status: ${status.readyState}`);
+        console.error(`📋 Deployment details:`, {
+          id: status.id,
+          url: status.url,
+          error: status.error,
+          meta: status.meta
+        });
+        
+        try {
+          const logsRes = await axios.get(
+            `${VERCEL_API_BASE}/v2/deployments/${deploymentId}/events`,
+            { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } }
+          );
+          console.error(`📝 Build logs:`, logsRes.data);
+        } catch (logsError) {
+          console.error(`⚠️ Could not fetch build logs:`, logsError.message);
+        }
+        
+        throw new Error(`Deployment failed with status: ${status.readyState}. Check Vercel dashboard for detailed logs.`);
       }
 
     } catch (err) {
@@ -82,20 +96,18 @@ exports.deployTheme = async (req, res) => {
   const githubToken = process.env.GITHUB_TOKEN;
   const vercelToken = process.env.VERCEL_API_TOKEN;
 
-  // Validate Vercel token
   if (!vercelToken) {
     console.error('❌ Missing VERCEL_TOKEN');
     broadcastProgress('error', 'Missing VERCEL_TOKEN', 100);
     return res.status(500).json({ error: 'Server configuration error: Missing VERCEL_TOKEN' });
   }
 
-  if (!storeId || !githubRepoUrl || !projectName || !theme || !domain || !githubToken) {
+  if (!storeId || !githubRepoUrl || !projectName || !theme || !githubToken) {
     console.error('❌ Missing required fields (storeId, githubRepoUrl, githubToken, etc.)');
     broadcastProgress('error', 'Missing required fields', 100);
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  // Sanitize project name for Vercel (alphanumeric and hyphens only)
   const sanitizedProjectName = projectName
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, '-')
@@ -106,28 +118,45 @@ exports.deployTheme = async (req, res) => {
   console.log(`📂 Using temporary directory: ${localPath}`);
 
   try {
-    // ✅ Inject token into URL safely
     const secureRepoUrl = githubRepoUrl.replace(
       /^https:\/\//,
       `https://${githubToken}@`
     );
 
-    // 1. Clone repository
     broadcastProgress('cloning', 'Cloning repository...', 20);
     console.log(`⏳ Cloning repository from ${githubRepoUrl} using branch ${branch}...`);
     await simpleGit().clone(secureRepoUrl, localPath, ['-b', branch]);
     console.log('✅ Repository cloned successfully');
 
-    // Check if package.json exists
     const packageJsonPath = path.join(localPath, 'package.json');
     if (!fs.existsSync(packageJsonPath)) {
       throw new Error('package.json not found in repository. Cannot deploy a non-Node.js project.');
     }
 
-    // 2. Generate access token
+    try {
+      const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
+      console.log('📦 Package.json info:', {
+        name: packageJson.name,
+        version: packageJson.version,
+        hasBuildScript: !!packageJson.scripts?.build,
+        hasDevScript: !!packageJson.scripts?.dev,
+        dependencies: Object.keys(packageJson.dependencies || {}).length,
+        devDependencies: Object.keys(packageJson.devDependencies || {}).length
+      });
+
+      let detectedFramework = 'other';
+      if (packageJson.dependencies?.next) detectedFramework = 'nextjs';
+      else if (packageJson.dependencies?.react) detectedFramework = 'react';
+      else if (packageJson.dependencies?.vue) detectedFramework = 'vue';
+      else if (packageJson.dependencies?.nuxt) detectedFramework = 'nuxt';
+      
+      console.log(`🔍 Detected framework: ${detectedFramework}`);
+    } catch (error) {
+      console.warn('⚠️ Could not parse package.json:', error.message);
+    }
+
     const accessToken = jwt.sign({ storeId }, process.env.ACCESS_TOKEN_SECRET);
 
-    // 3. Write env vars
     const updatedEnvVars = { ...envVars, STORE_TOKEN: accessToken };
     broadcastProgress('env-setup', 'Setting up environment...', 30);
     console.log('⚙️ Writing environment variables to .env files...');
@@ -141,9 +170,10 @@ exports.deployTheme = async (req, res) => {
       fs.writeFile(path.join(localPath, '.env.local'), envContent)
     ]);
 
-    // 4. Prepare files
     broadcastProgress('file-prep', 'Preparing files...', 40);
     console.log('📦 Reading files from repository...');
+    
+    const { globby } = await import('globby');
     const filePaths = await globby(['**/*'], {
       cwd: localPath,
       gitignore: true,
@@ -162,12 +192,10 @@ exports.deployTheme = async (req, res) => {
       }))
     );
 
-    // 5. Create Vercel project with a scoped unique name
     const scopedProjectName = `${sanitizedProjectName}-${storeId.slice(0, 8)}`;
     broadcastProgress('vercel-project', 'Creating Vercel project...', 45);
     console.log(`📁 Creating Vercel project with name: ${scopedProjectName}...`);
 
-    // Test Vercel API connection first
     try {
       const testResponse = await axios.get(`${VERCEL_API_BASE}/v2/user`, {
         headers: {
@@ -185,7 +213,6 @@ exports.deployTheme = async (req, res) => {
       throw new Error(`Vercel API connection failed: ${testError.message}`);
     }
 
-    // Check if project exists first to avoid duplicates
     let vercelProjectId;
     try {
       const checkProjectRes = await axios.get(
@@ -203,7 +230,6 @@ exports.deployTheme = async (req, res) => {
       if (projectError.response && projectError.response.status === 404) {
         console.log('Project does not exist yet, creating new project...');
         try {
-          // Project doesn't exist, create a new one
           const createProjectRes = await axios.post(
             `${VERCEL_API_BASE}/v11/projects`,
             {
@@ -241,7 +267,6 @@ exports.deployTheme = async (req, res) => {
       }
     }
 
-    // 6. Set env vars BEFORE deployment
     broadcastProgress('env-vercel', 'Configuring environment in Vercel...', 50);
     console.log('⚙️ Sending environment variables to Vercel...');
 
@@ -270,22 +295,18 @@ exports.deployTheme = async (req, res) => {
         console.warn('Response data:', envError.response.data);
         console.warn('Response status:', envError.response.status);
       }
-      // Continue even if env vars fail - not critical
     }
 
-    // 7. Now deploy the code with proper project linking
     broadcastProgress('vercel-deploy', 'Creating Vercel deployment...', 60);
     console.log('🚀 Sending files to Vercel...');
 
     let deployRes;
     try {
-      // Try deployment with full set of parameters first
       console.log(`Attempting deployment for project ID: ${vercelProjectId}`);
       deployRes = await axios.post(
         `${VERCEL_API_BASE}/v13/deployments`,
         {
           name: scopedProjectName,
-          // projectId: vercelProjectId,
           files,
           target: 'production',
           framework: 'nextjs',
@@ -304,14 +325,12 @@ exports.deployTheme = async (req, res) => {
         console.error('Response status:', deployError.response.status);
       }
 
-      // Try simplified deployment as fallback
       console.log('Attempting simplified deployment as fallback...');
       try {
         deployRes = await axios.post(
           `${VERCEL_API_BASE}/v13/deployments`,
           {
             name: scopedProjectName,
-            // projectId: vercelProjectId,
             files,
             target: 'production',
           },
@@ -336,11 +355,9 @@ exports.deployTheme = async (req, res) => {
     console.log(`✅ Deployment created with ID: ${deploymentId} and URL: ${deploymentUrl}`);
     broadcastProgress('vercel-created', 'Vercel deployment created', 70);
 
-    // 8. Poll deployment
     broadcastProgress('vercel-polling', 'Polling for deployment status...', 75);
     const deploymentStatus = await pollDeploymentStatus(deploymentId, startTime);
 
-    // 9. Save project
     broadcastProgress('db-save', 'Saving project to database...', 85);
     const createdProject = await Project.create({
       storeId,
@@ -356,49 +373,101 @@ exports.deployTheme = async (req, res) => {
 
     const projectId = createdProject._id;
 
-    // 10. Cleanup
     broadcastProgress('cleanup', 'Removing temp files...', 90);
     await fs.remove(localPath);
 
-    // 11. Link domain
-    broadcastProgress('domain-link', 'Linking domain...', 95);
-    try {
-      const domainResult = await purchaseAndLinkDomain({
-        body: { vercelProjectId, domain, projectId }
-      }, {
-        status: (code) => ({
-          json: (data) => {
-            if (code >= 400) throw new Error(data.error || 'Domain linking failed');
-            return data;
-          }
-        })
-      });
+    let domainError = null;
+    let subdomainError = null;
+    let subdomain = null;
+    let linkedDomain = null;
+    let updatedProject = null;
 
-      await Project.findByIdAndUpdate(projectId, { domain });
-      broadcastProgress('domain-success', 'Domain linked successfully', 98);
-    } catch (domainErr) {
-      console.warn('⚠️ Domain linking failed:', domainErr.message);
-      await Project.findByIdAndUpdate(projectId, {
-        domain,
-        domainError: domainErr.message
-      });
-      broadcastProgress('domain-failed', 'Domain linking failed', 98);
+    if (domain) {
+      broadcastProgress('domain-link', 'Linking domain...', 95);
+      try {
+        await purchaseAndLinkDomain({
+          body: { vercelProjectId, domain, projectId }
+        }, {
+          status: (code) => ({
+            json: (data) => {
+              if (code >= 400) throw new Error(data.error || 'Domain linking failed');
+              return data;
+            }
+          })
+        });
+        await Project.findByIdAndUpdate(projectId, { domain });
+        broadcastProgress('domain-success', 'Domain linked successfully', 98);
+      } catch (err) {
+        domainError = err.message;
+        await Project.findByIdAndUpdate(projectId, {
+          domain,
+          domainError: err.message
+        });
+        broadcastProgress('domain-failed', 'Domain linking failed', 98);
+      }
+      updatedProject = await Project.findById(projectId);
+      subdomain = updatedProject.subdomain;
+      linkedDomain = domain;
+    } else {
+      broadcastProgress('subdomain-create', 'Creating automatic subdomain...', 98);
+      try {
+        const subdomainName = sanitizedProjectName.replace(/[^a-z0-9-]/g, '');
+        const fullSubdomain = `${subdomainName}.${PARENT_DOMAIN}`;
+        console.log(`🌐 Creating automatic subdomain: ${fullSubdomain}`);
+        await createSubdomainCNAME(subdomainName, PARENT_DOMAIN);
+        let vercelSubdomainResponse = null;
+        try {
+          vercelSubdomainResponse = await axios.post(
+            `${VERCEL_API_BASE}/v9/projects/${vercelProjectId}/domains`,
+            { name: fullSubdomain },
+            {
+              headers: {
+                Authorization: `Bearer ${vercelToken}`,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+          await Project.findByIdAndUpdate(projectId, {
+            subdomain: fullSubdomain,
+            subdomainCreated: true
+          });
+          subdomain = fullSubdomain;
+          broadcastProgress('subdomain-success', `Subdomain created and linked: ${fullSubdomain}`, 99);
+        } catch (vercelDomainErr) {
+          subdomainError = `Vercel domain link error: ${vercelDomainErr.response?.data?.error?.message || vercelDomainErr.message}`;
+          await Project.findByIdAndUpdate(projectId, {
+            subdomainError: subdomainError
+          });
+          broadcastProgress('subdomain-failed', 'Subdomain linking to Vercel failed', 99);
+        }
+      } catch (err) {
+        subdomainError = err.message;
+        await Project.findByIdAndUpdate(projectId, {
+          subdomainError: err.message
+        });
+        broadcastProgress('subdomain-failed', 'Subdomain creation failed', 99);
+      }
+      updatedProject = await Project.findById(projectId);
+      linkedDomain = null;
     }
 
-    // 12. Finish
     const totalTime = Math.floor((Date.now() - startTime) / 1000);
     console.log(`✅ Deployment completed in ${totalTime} seconds`);
     broadcastProgress('complete', 'Deployment completed successfully', 100);
 
     return res.status(201).json({
       message: 'Deployed and built successfully 🎉',
-      domain,
+      domain: linkedDomain,
+      subdomain,
       projectId,
       projectUrl: `https://${deploymentUrl}`,
+      subdomainUrl: subdomain ? `https://${subdomain}` : null,
       vercelProjectId,
       deploymentStatus: deploymentStatus.readyState,
       deploymentTime: `${totalTime} seconds`,
       accessToken,
+      domainError,
+      subdomainError
     });
 
   } catch (err) {
@@ -423,109 +492,6 @@ exports.deployTheme = async (req, res) => {
   }
 };
 
-
-
-// Helper function to create Git credentials in Vercel
-// async function createGitCredentialIfNeeded(repoOwner, repoName) {
-//   try {
-//     // Check if credential already exists
-//     const { data: credentials } = await axios.get(
-//       `${VERCEL_API_BASE}/v1/integrations/git-credentials`,
-//       {
-//         headers: {
-//           Authorization: `Bearer ${VERCEL_TOKEN}`,
-//         },
-//       }
-//     );
-
-//     const existingCred = credentials.find(c => c.name.includes(repoOwner));
-//     if (existingCred) return existingCred.id;
-
-//     // Create new credential if needed
-//     const { data: newCred } = await axios.post(
-//       `${VERCEL_API_BASE}/v1/integrations/git-credentials`,
-//       {
-//         type: 'github',
-//         name: `${repoOwner}-${repoName}-${Date.now()}`,
-//         username: 'x-access-token',
-//         password: GITHUB_TOKEN
-//       },
-//       {
-//         headers: {
-//           Authorization: `Bearer ${VERCEL_TOKEN}`,
-//           'Content-Type': 'application/json',
-//         },
-//       }
-//     );
-
-//     return newCred.id;
-//   } catch (error) {
-//     console.warn('⚠️ Could not create Git credential:', error.message);
-//     return null;
-//   }
-// }
-
-// exports.updateProjectsByTheme = async (req, res) => {
-//   const { themeId } = req.body;
-
-//   try {
-//     const projects = await Project.find({ theme: themeId });
-//     if (!projects.length) {
-//       return res.status(404).json({ message: 'No projects found' });
-//     }
-
-//     const results = await Promise.all(
-//       projects.map(async (project) => {
-//         if (!project.vercelProjectId) {
-//           return {
-//             projectId: project._id,
-//             status: 'skipped',
-//             reason: 'Missing Vercel project ID'
-//           };
-//         }
-
-//         const result = await triggerVercelDeployment(project);
-//         if (result.success) {
-//           await Project.findByIdAndUpdate(project._id, {
-//             $set: { lastDeployed: new Date() },
-//             $push: {
-//               deployments: {
-//                 deploymentId: result.deploymentId,
-//                 url: result.url,
-//                 date: new Date(),
-//                 source: 'github',
-//                 branch: project.branch || 'main',
-//                 derivedName: result.derivedProjectName
-//               }
-//             }
-//           });
-//         }
-
-//         return {
-//           projectId: project._id,
-//           domain: project.domain,
-//           status: result.success ? 'success' : 'failed',
-//           ...result
-//         };
-//       })
-//     );
-
-//     return res.json({
-//       message: 'Deployments processed',
-//       results
-//     });
-//   } catch (error) {
-//     console.error('Deployment error:', error);
-//     return res.status(500).json({
-//       error: 'Deployment failed',
-//       details: error.message
-//     });
-//   }
-// };
-
-
-
-// Get all projects
 exports.getAllProjects = async (req, res) => {
   try {
     console.log('📋 Fetching all projects...');
@@ -538,7 +504,6 @@ exports.getAllProjects = async (req, res) => {
   }
 };
 
-// Get projects by storeId
 exports.getProjectsByStoreId = async (req, res) => {
   const { storeId } = req.params;
 
